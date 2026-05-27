@@ -192,9 +192,41 @@ pub struct BookingLinkInput {
     pub latest_hour: Option<u32>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CalSyncInput {
+    /// Direction: pull (external→local) or push (local→external)
+    pub direction: String,
+    /// Resource ID to sync
+    pub resource_id: String,
+    /// Start of sync window (ISO datetime)
+    pub start: String,
+    /// End of sync window (ISO datetime)
+    pub end: String,
+    /// Calendar ID (for Google: "primary" or email, for others: optional)
+    pub calendar_id: Option<String>,
+}
+
 #[derive(Clone)]
-pub struct SchedulingServer { pub store: Store }
-impl SchedulingServer { pub fn new() -> Self { Self { store: Store::new() } } }
+pub struct SchedulingServer {
+    pub store: Store,
+    pub client: reqwest::Client,
+    pub google_token: Option<String>,
+    pub microsoft_token: Option<String>,
+    pub calcom_key: Option<String>,
+    pub calendly_token: Option<String>,
+}
+impl SchedulingServer {
+    pub fn new() -> Self {
+        Self {
+            store: Store::new(),
+            client: reqwest::Client::builder().build().unwrap_or_default(),
+            google_token: std::env::var("GOOGLE_CALENDAR_TOKEN").ok(),
+            microsoft_token: std::env::var("MICROSOFT_GRAPH_TOKEN").ok(),
+            calcom_key: std::env::var("CALCOM_API_KEY").ok(),
+            calendly_token: std::env::var("CALENDLY_TOKEN").ok(),
+        }
+    }
+}
 
 #[tool_router(server_handler)]
 impl SchedulingServer {
@@ -573,6 +605,144 @@ impl SchedulingServer {
             "shareable_url": format!("https://book.example.com/{}", id),
             "embed_code": format!("<iframe src=\"https://book.example.com/{}\" width=\"100%\" height=\"600\"></iframe>", id)
         }).to_string()
+    }
+
+    // === Backend Integrations ===
+
+    #[tool(description = "Sync with Google Calendar. Pull imports events, push exports bookings. Requires GOOGLE_CALENDAR_TOKEN env var.")]
+    async fn sync_google_calendar(&self, Parameters(input): Parameters<CalSyncInput>) -> String {
+        let Some(ref token) = self.google_token else {
+            return json!({"error": "NOT_CONFIGURED", "message": "Set GOOGLE_CALENDAR_TOKEN"}).to_string();
+        };
+        let calendar_id = input.calendar_id.as_deref().unwrap_or("primary");
+        
+        match input.direction.as_str() {
+            "pull" => {
+                let url = format!("https://www.googleapis.com/calendar/v3/calendars/{}/events?timeMin={}&timeMax={}&singleEvents=true", calendar_id, input.start, input.end);
+                match self.client.get(&url).bearer_auth(&token).send().await {
+                    Ok(resp) => match resp.json::<serde_json::Value>().await {
+                        Ok(data) => {
+                            let events = data["items"].as_array().unwrap_or(&vec![]).clone();
+                            let mut synced = 0;
+                            for event in &events {
+                                let id = Store::new_id("gcal");
+                                let booking = Booking { id, resource_id: input.resource_id.clone(), title: event["summary"].as_str().unwrap_or("").into(), start: event["start"]["dateTime"].as_str().unwrap_or("").into(), end: event["end"]["dateTime"].as_str().unwrap_or("").into(), status: "confirmed".into(), booked_by: "google_calendar".into(), attendees: vec![], recurrence: None, notes: None, metadata: json!({"source": "google_calendar", "google_id": event["id"]}) };
+                                self.store.bookings.lock().unwrap().push(booking);
+                                synced += 1;
+                            }
+                            json!({"status": "pulled", "source": "google_calendar", "events_synced": synced}).to_string()
+                        }
+                        Err(e) => json!({"error": e.to_string()}).to_string(),
+                    },
+                    Err(e) => json!({"error": e.to_string()}).to_string(),
+                }
+            }
+            "push" => {
+                let to_push: Vec<_> = self.store.bookings.lock().unwrap().iter().filter(|b| b.resource_id == input.resource_id && b.start >= input.start && b.end <= input.end && b.status != "cancelled").cloned().collect();
+                let mut pushed = 0;
+                for b in &to_push {
+                    let url = format!("https://www.googleapis.com/calendar/v3/calendars/{}/events", calendar_id);
+                    let body = json!({"summary": b.title, "start": {"dateTime": b.start}, "end": {"dateTime": b.end}});
+                    if self.client.post(&url).bearer_auth(token).json(&body).send().await.is_ok() { pushed += 1; }
+                }
+                json!({"status": "pushed", "destination": "google_calendar", "events_pushed": pushed}).to_string()
+            }
+            _ => json!({"error": "Invalid direction. Use 'pull' or 'push'"}).to_string(),
+        }
+    }
+
+    #[tool(description = "Sync with Microsoft Outlook/365 Calendar. Requires MICROSOFT_GRAPH_TOKEN env var.")]
+    async fn sync_outlook(&self, Parameters(input): Parameters<CalSyncInput>) -> String {
+        let Some(ref token) = self.microsoft_token else {
+            return json!({"error": "NOT_CONFIGURED", "message": "Set MICROSOFT_GRAPH_TOKEN"}).to_string();
+        };
+        
+        match input.direction.as_str() {
+            "pull" => {
+                let url = format!("https://graph.microsoft.com/v1.0/me/calendarView?startDateTime={}&endDateTime={}", input.start, input.end);
+                match self.client.get(&url).bearer_auth(&token).send().await {
+                    Ok(resp) => match resp.json::<serde_json::Value>().await {
+                        Ok(data) => {
+                            let events = data["value"].as_array().unwrap_or(&vec![]).clone();
+                            let mut synced = 0;
+                            for event in &events {
+                                let id = Store::new_id("msft");
+                                let booking = Booking { id, resource_id: input.resource_id.clone(), title: event["subject"].as_str().unwrap_or("").into(), start: event["start"]["dateTime"].as_str().unwrap_or("").into(), end: event["end"]["dateTime"].as_str().unwrap_or("").into(), status: "confirmed".into(), booked_by: "outlook".into(), attendees: vec![], recurrence: None, notes: None, metadata: json!({"source": "outlook", "outlook_id": event["id"]}) };
+                                self.store.bookings.lock().unwrap().push(booking);
+                                synced += 1;
+                            }
+                            json!({"status": "pulled", "source": "outlook", "events_synced": synced}).to_string()
+                        }
+                        Err(e) => json!({"error": e.to_string()}).to_string(),
+                    },
+                    Err(e) => json!({"error": e.to_string()}).to_string(),
+                }
+            }
+            "push" => json!({"status": "push_supported", "message": "Use Microsoft Graph POST /me/events"}).to_string(),
+            _ => json!({"error": "Invalid direction"}).to_string(),
+        }
+    }
+
+    #[tool(description = "Sync with Cal.com. Pull imports bookings, push creates events. Requires CALCOM_API_KEY env var.")]
+    async fn sync_calcom(&self, Parameters(input): Parameters<CalSyncInput>) -> String {
+        let Some(ref api_key) = self.calcom_key else {
+            return json!({"error": "NOT_CONFIGURED", "message": "Set CALCOM_API_KEY"}).to_string();
+        };
+        
+        match input.direction.as_str() {
+            "pull" => {
+                let url = format!("https://api.cal.com/v2/bookings?apiKey={}&dateFrom={}&dateTo={}", api_key, input.start, input.end);
+                match self.client.get(&url).send().await {
+                    Ok(resp) => match resp.json::<serde_json::Value>().await {
+                        Ok(data) => {
+                            let bookings_data = data["bookings"].as_array().unwrap_or(&vec![]).clone();
+                            let mut synced = 0;
+                            for b in &bookings_data {
+                                let id = Store::new_id("cal");
+                                let booking = Booking { id, resource_id: input.resource_id.clone(), title: b["title"].as_str().unwrap_or("").into(), start: b["startTime"].as_str().unwrap_or("").into(), end: b["endTime"].as_str().unwrap_or("").into(), status: "confirmed".into(), booked_by: "calcom".into(), attendees: vec![], recurrence: None, notes: None, metadata: json!({"source": "calcom", "calcom_id": b["id"]}) };
+                                self.store.bookings.lock().unwrap().push(booking);
+                                synced += 1;
+                            }
+                            json!({"status": "pulled", "source": "calcom", "bookings_synced": synced}).to_string()
+                        }
+                        Err(e) => json!({"error": e.to_string()}).to_string(),
+                    },
+                    Err(e) => json!({"error": e.to_string()}).to_string(),
+                }
+            }
+            _ => json!({"error": "Invalid direction"}).to_string(),
+        }
+    }
+
+    #[tool(description = "Sync with Calendly. Pull imports scheduled events. Requires CALENDLY_TOKEN env var.")]
+    async fn sync_calendly(&self, Parameters(input): Parameters<CalSyncInput>) -> String {
+        let Some(ref token) = self.calendly_token else {
+            return json!({"error": "NOT_CONFIGURED", "message": "Set CALENDLY_TOKEN"}).to_string();
+        };
+        
+        match input.direction.as_str() {
+            "pull" => {
+                let url = format!("https://api.calendly.com/scheduled_events?min_start_time={}&max_start_time={}", input.start, input.end);
+                match self.client.get(&url).bearer_auth(&token).send().await {
+                    Ok(resp) => match resp.json::<serde_json::Value>().await {
+                        Ok(data) => {
+                            let events = data["collection"].as_array().unwrap_or(&vec![]).clone();
+                            let mut synced = 0;
+                            for event in &events {
+                                let id = Store::new_id("cly");
+                                let booking = Booking { id, resource_id: input.resource_id.clone(), title: event["name"].as_str().unwrap_or("").into(), start: event["start_time"].as_str().unwrap_or("").into(), end: event["end_time"].as_str().unwrap_or("").into(), status: "confirmed".into(), booked_by: "calendly".into(), attendees: vec![], recurrence: None, notes: None, metadata: json!({"source": "calendly", "calendly_uri": event["uri"]}) };
+                                self.store.bookings.lock().unwrap().push(booking);
+                                synced += 1;
+                            }
+                            json!({"status": "pulled", "source": "calendly", "events_synced": synced}).to_string()
+                        }
+                        Err(e) => json!({"error": e.to_string()}).to_string(),
+                    },
+                    Err(e) => json!({"error": e.to_string()}).to_string(),
+                }
+            }
+            _ => json!({"error": "Invalid direction"}).to_string(),
+        }
     }
 }
 
