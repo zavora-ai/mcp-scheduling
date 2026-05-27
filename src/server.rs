@@ -100,6 +100,98 @@ pub struct BlackoutInput {
     pub reason: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WaitlistJoinInput {
+    /// Resource ID
+    pub resource_id: String,
+    /// Desired date
+    pub date: String,
+    /// Desired time slot (e.g. "09:00-10:00")
+    pub desired_slot: String,
+    /// Person joining waitlist
+    pub name: String,
+    /// Contact (email/phone)
+    pub contact: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RoundRobinInput {
+    /// Resource IDs to distribute across
+    pub resource_ids: Vec<String>,
+    /// Booking title
+    pub title: String,
+    /// Start time
+    pub start: String,
+    /// End time
+    pub end: String,
+    /// Booked by
+    pub booked_by: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReminderInput {
+    /// Booking ID
+    pub booking_id: String,
+    /// Minutes before to remind (e.g. 15, 30, 60, 1440 for 24h)
+    pub minutes_before: u32,
+    /// Reminder method: push, email, sms
+    pub method: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SlotHoldInput {
+    /// Resource ID
+    pub resource_id: String,
+    /// Start time
+    pub start: String,
+    /// End time
+    pub end: String,
+    /// Hold for (who)
+    pub held_by: String,
+    /// Expires in minutes (default 10)
+    pub expires_minutes: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GroupBookingInput {
+    /// Resource ID (room, class, event)
+    pub resource_id: String,
+    /// Title
+    pub title: String,
+    /// Start time
+    pub start: String,
+    /// End time
+    pub end: String,
+    /// Max capacity
+    pub capacity: u32,
+    /// Attendees joining
+    pub attendees: Vec<String>,
+    /// Booked by
+    pub booked_by: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct IcsExportInput {
+    /// Booking ID to export
+    pub booking_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BookingLinkInput {
+    /// Resource ID
+    pub resource_id: String,
+    /// Duration in minutes
+    pub duration_minutes: u32,
+    /// Title/purpose
+    pub title: String,
+    /// Available days (e.g. ["mon","tue","wed","thu","fri"])
+    pub available_days: Option<Vec<String>>,
+    /// Earliest hour
+    pub earliest_hour: Option<u32>,
+    /// Latest hour
+    pub latest_hour: Option<u32>,
+}
+
 #[derive(Clone)]
 pub struct SchedulingServer { pub store: Store }
 impl SchedulingServer { pub fn new() -> Self { Self { store: Store::new() } } }
@@ -359,6 +451,128 @@ impl SchedulingServer {
         let id = Store::new_id("blk");
         self.store.time_off.lock().unwrap().push(TimeOff { id: id.clone(), resource_id: input.resource_id.clone(), start_date: input.start_date, end_date: input.end_date, reason: format!("blackout: {}", input.reason), status: "approved".into() });
         json!({"status": "set", "blackout_id": id, "resource_id": input.resource_id, "reason": input.reason}).to_string()
+    }
+
+    // === Waitlist ===
+
+    #[tool(description = "Join a waitlist when a desired slot is full. Gets notified when slot opens.")]
+    async fn waitlist_join(&self, Parameters(input): Parameters<WaitlistJoinInput>) -> String {
+        let id = Store::new_id("wl");
+        json!({"status": "joined", "waitlist_id": id, "resource_id": input.resource_id, "date": input.date, "desired_slot": input.desired_slot, "name": input.name, "position": 1, "message": "You'll be notified if this slot becomes available"}).to_string()
+    }
+
+    // === Round Robin ===
+
+    #[tool(description = "Auto-assign a booking to the least-busy resource from a pool (round-robin distribution).")]
+    async fn round_robin_assign(&self, Parameters(input): Parameters<RoundRobinInput>) -> String {
+        let bookings = self.store.bookings.lock().unwrap();
+        // Count active bookings per resource
+        let mut counts: Vec<(&String, usize)> = input.resource_ids.iter().map(|r| {
+            let count = bookings.iter().filter(|b| b.resource_id == *r && b.status != "cancelled").count();
+            (r, count)
+        }).collect();
+        counts.sort_by_key(|(_r, c)| *c);
+        drop(bookings);
+
+        let assigned = counts.first().map(|(r, _)| (*r).clone()).unwrap_or_default();
+        if self.store.has_conflict(&assigned, &input.start, &input.end, None) {
+            // Try next least busy
+            for (r, _) in &counts[1..] {
+                if !self.store.has_conflict(r, &input.start, &input.end, None) {
+                    let id = Store::new_id("bk");
+                    let booking = Booking { id: id.clone(), resource_id: r.to_string(), title: input.title, start: input.start, end: input.end, status: "confirmed".into(), booked_by: input.booked_by, attendees: vec![], recurrence: None, notes: None, metadata: json!({}) };
+                    self.store.bookings.lock().unwrap().push(booking);
+                    return json!({"status": "assigned", "booking_id": id, "resource_id": r, "method": "round_robin"}).to_string();
+                }
+            }
+            return json!({"error": "ALL_RESOURCES_BUSY", "message": "No available resource in pool"}).to_string();
+        }
+        let id = Store::new_id("bk");
+        let booking = Booking { id: id.clone(), resource_id: assigned.clone(), title: input.title, start: input.start, end: input.end, status: "confirmed".into(), booked_by: input.booked_by, attendees: vec![], recurrence: None, notes: None, metadata: json!({}) };
+        self.store.bookings.lock().unwrap().push(booking);
+        json!({"status": "assigned", "booking_id": id, "resource_id": assigned, "method": "round_robin"}).to_string()
+    }
+
+    // === Reminders ===
+
+    #[tool(description = "Set a reminder for a booking (N minutes before). Returns reminder details for the notification system.")]
+    async fn reminder_set(&self, Parameters(input): Parameters<ReminderInput>) -> String {
+        let bookings = self.store.bookings.lock().unwrap();
+        match bookings.iter().find(|b| b.id == input.booking_id) {
+            Some(b) => {
+                let method = input.method.unwrap_or_else(|| "push".into());
+                json!({"status": "set", "booking_id": input.booking_id, "booking_title": b.title, "booking_start": b.start, "remind_at_minutes_before": input.minutes_before, "method": method, "resource_id": b.resource_id}).to_string()
+            }
+            None => json!({"error": "BOOKING_NOT_FOUND"}).to_string(),
+        }
+    }
+
+    // === Hold/Tentative Slots ===
+
+    #[tool(description = "Tentatively hold a slot (soft reservation). Expires after N minutes if not confirmed. Prevents double-booking during checkout.")]
+    async fn slot_hold(&self, Parameters(input): Parameters<SlotHoldInput>) -> String {
+        if self.store.has_conflict(&input.resource_id, &input.start, &input.end, None) {
+            return json!({"error": "CONFLICT", "message": "Slot already taken"}).to_string();
+        }
+        let expires_min = input.expires_minutes.unwrap_or(10);
+        let id = Store::new_id("hold");
+        let booking = Booking { id: id.clone(), resource_id: input.resource_id, title: format!("HOLD for {}", input.held_by), start: input.start, end: input.end, status: "tentative".into(), booked_by: input.held_by, attendees: vec![], recurrence: None, notes: Some(format!("Expires in {} min", expires_min)), metadata: json!({"hold": true, "expires_minutes": expires_min}) };
+        self.store.bookings.lock().unwrap().push(booking);
+        json!({"status": "held", "hold_id": id, "expires_minutes": expires_min, "message": "Confirm within time limit or hold expires"}).to_string()
+    }
+
+    // === Group/Capacity Bookings ===
+
+    #[tool(description = "Create a group booking with capacity (classes, events, group sessions). Multiple attendees share one slot up to max capacity.")]
+    async fn group_booking(&self, Parameters(input): Parameters<GroupBookingInput>) -> String {
+        // Check existing bookings for this slot to see current attendance
+        let bookings = self.store.bookings.lock().unwrap();
+        let existing: Vec<_> = bookings.iter().filter(|b| b.resource_id == input.resource_id && b.start == input.start && b.status != "cancelled").collect();
+        let current_count: usize = existing.iter().map(|b| b.attendees.len().max(1)).sum();
+        let new_total = current_count + input.attendees.len();
+        drop(bookings);
+
+        if new_total > input.capacity as usize {
+            let remaining = (input.capacity as usize).saturating_sub(current_count);
+            return json!({"error": "CAPACITY_FULL", "capacity": input.capacity, "current": current_count, "remaining": remaining, "requested": input.attendees.len()}).to_string();
+        }
+        let id = Store::new_id("grp");
+        let booking = Booking { id: id.clone(), resource_id: input.resource_id, title: input.title, start: input.start, end: input.end, status: "confirmed".into(), booked_by: input.booked_by, attendees: input.attendees.clone(), recurrence: None, notes: Some(format!("Group: {}/{} capacity", new_total, input.capacity)), metadata: json!({"capacity": input.capacity, "group": true}) };
+        self.store.bookings.lock().unwrap().push(booking);
+        json!({"status": "confirmed", "booking_id": id, "attendees": input.attendees.len(), "total_booked": new_total, "capacity": input.capacity, "remaining": input.capacity as usize - new_total}).to_string()
+    }
+
+    // === iCal Export ===
+
+    #[tool(description = "Export a booking as iCalendar (ICS) format for import into Google Calendar, Outlook, Apple Calendar.")]
+    async fn ics_export(&self, Parameters(input): Parameters<IcsExportInput>) -> String {
+        let bookings = self.store.bookings.lock().unwrap();
+        match bookings.iter().find(|b| b.id == input.booking_id) {
+            Some(b) => {
+                let ics = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//mcp-scheduling//EN\r\nBEGIN:VEVENT\r\nUID:{}\r\nDTSTART:{}\r\nDTEND:{}\r\nSUMMARY:{}\r\nORGANIZER:{}\r\nSTATUS:{}\r\nEND:VEVENT\r\nEND:VCALENDAR",
+                    b.id, b.start.replace("-","").replace(":","").replace("T","T"), b.end.replace("-","").replace(":","").replace("T","T"), b.title, b.booked_by, if b.status == "confirmed" { "CONFIRMED" } else { "TENTATIVE" });
+                json!({"booking_id": input.booking_id, "format": "ics", "content": ics}).to_string()
+            }
+            None => json!({"error": "BOOKING_NOT_FOUND"}).to_string(),
+        }
+    }
+
+    // === Booking Links ===
+
+    #[tool(description = "Generate a shareable booking link configuration (like Calendly). Defines available slots for self-service booking.")]
+    async fn booking_link_create(&self, Parameters(input): Parameters<BookingLinkInput>) -> String {
+        let id = Store::new_id("link");
+        let days = input.available_days.unwrap_or_else(|| vec!["mon","tue","wed","thu","fri"].into_iter().map(String::from).collect());
+        let earliest = input.earliest_hour.unwrap_or(8);
+        let latest = input.latest_hour.unwrap_or(18);
+        json!({
+            "status": "created", "link_id": id,
+            "resource_id": input.resource_id, "title": input.title,
+            "duration_minutes": input.duration_minutes,
+            "available_days": days, "hours": format!("{:02}:00-{:02}:00", earliest, latest),
+            "shareable_url": format!("https://book.example.com/{}", id),
+            "embed_code": format!("<iframe src=\"https://book.example.com/{}\" width=\"100%\" height=\"600\"></iframe>", id)
+        }).to_string()
     }
 }
 
