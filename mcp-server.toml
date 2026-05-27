@@ -1,6 +1,6 @@
 server_id = "mcp_scheduling"
 display_name = "Scheduling"
-version = "1.0.0"
+version = "1.1.0"
 domain = "scheduling"
 sdk_version = "0.1.0"
 risk_level = "low"

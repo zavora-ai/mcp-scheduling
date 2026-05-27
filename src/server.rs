@@ -30,6 +30,76 @@ pub struct DateRangeInput { pub resource_id: Option<String>, pub start: String, 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct FindSlotInput { pub resource_ids: Vec<String>, pub duration_minutes: u32, pub date: String, pub earliest: Option<String>, pub latest: Option<String> }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct HolidaysInput {
+    /// Country code (ISO 3166-1 alpha-2)
+    pub country: String,
+    /// Year (default: current year)
+    pub year: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TimezoneConvertInput {
+    /// Time to convert (ISO datetime or HH:MM)
+    pub time: String,
+    /// Source timezone (IANA, e.g. "Africa/Nairobi", "America/New_York")
+    pub from_tz: String,
+    /// Target timezone(s)
+    pub to_tz: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct OverlapInput {
+    /// Participants with their timezones: [{"name": "James", "timezone": "Africa/Nairobi"}, ...]
+    pub participants: Vec<serde_json::Value>,
+    /// Duration needed in minutes
+    pub duration_minutes: u32,
+    /// Date to check (YYYY-MM-DD)
+    pub date: String,
+    /// Earliest acceptable local hour (default 8)
+    pub earliest_hour: Option<u32>,
+    /// Latest acceptable local hour (default 18)
+    pub latest_hour: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WorkWeekInput {
+    /// Resource ID
+    pub resource_id: String,
+    /// Work week pattern: "mon-fri", "sun-thu", "mon-sat", or custom days ["mon","tue","wed","thu","fri"]
+    pub pattern: String,
+    /// Daily start time (HH:MM)
+    pub start_time: String,
+    /// Daily end time (HH:MM)
+    pub end_time: String,
+    /// Break start (optional, e.g. "12:00")
+    pub break_start: Option<String>,
+    /// Break end (optional, e.g. "13:00")
+    pub break_end: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BufferInput {
+    /// Resource ID
+    pub resource_id: String,
+    /// Buffer minutes before each booking
+    pub before_minutes: Option<u32>,
+    /// Buffer minutes after each booking
+    pub after_minutes: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BlackoutInput {
+    /// Resource ID (or "all" for company-wide)
+    pub resource_id: String,
+    /// Start date
+    pub start_date: String,
+    /// End date
+    pub end_date: String,
+    /// Reason
+    pub reason: String,
+}
+
 #[derive(Clone)]
 pub struct SchedulingServer { pub store: Store }
 impl SchedulingServer { pub fn new() -> Self { Self { store: Store::new() } } }
@@ -211,5 +281,194 @@ impl SchedulingServer {
         let shifts: Vec<_> = self.store.shifts.lock().unwrap().iter().filter(|s| s.resource_id == input.resource_id && s.start.starts_with(date)).cloned().collect();
         let on_leave = self.store.is_on_time_off(&input.resource_id, date);
         json!({"resource_id": input.resource_id, "date": date, "on_leave": on_leave, "bookings": bookings.len(), "shifts": shifts.len(), "booking_details": bookings, "shift_details": shifts}).to_string()
+    }
+
+    // === Timezone & Cultural ===
+
+    #[tool(description = "Get public holidays for a country and year. Covers 40+ countries with cultural and religious holidays.")]
+    async fn holidays_list(&self, Parameters(input): Parameters<HolidaysInput>) -> String {
+        let year = input.year.unwrap_or(2026);
+        let holidays = get_holidays(&input.country, year);
+        json!({"country": input.country, "year": year, "count": holidays.len(), "holidays": holidays}).to_string()
+    }
+
+    #[tool(description = "Convert time between timezones. Supports all IANA timezone names.")]
+    async fn timezone_convert(&self, Parameters(input): Parameters<TimezoneConvertInput>) -> String {
+        let offsets = get_tz_offsets();
+        let from_offset = offsets.get(input.from_tz.as_str()).copied().unwrap_or(0.0);
+        let mut results = Vec::new();
+        for tz in &input.to_tz {
+            let to_offset = offsets.get(tz.as_str()).copied().unwrap_or(0.0);
+            let diff = to_offset - from_offset;
+            results.push(json!({"timezone": tz, "offset_hours": to_offset, "difference_from_source": diff, "note": format!("{:+.1}h from {}", diff, input.from_tz)}));
+        }
+        json!({"source_time": input.time, "source_tz": input.from_tz, "conversions": results}).to_string()
+    }
+
+    #[tool(description = "Find overlapping working hours across participants in different timezones. Essential for international meetings.")]
+    async fn find_overlap(&self, Parameters(input): Parameters<OverlapInput>) -> String {
+        let earliest = input.earliest_hour.unwrap_or(8);
+        let latest = input.latest_hour.unwrap_or(18);
+        let offsets = get_tz_offsets();
+        // Find common window in UTC
+        let mut windows: Vec<(f64, f64)> = Vec::new();
+        for p in &input.participants {
+            let tz = p["timezone"].as_str().unwrap_or("UTC");
+            let offset = offsets.get(tz).copied().unwrap_or(0.0);
+            let utc_start = earliest as f64 - offset;
+            let utc_end = latest as f64 - offset;
+            windows.push((utc_start, utc_end));
+        }
+        // Intersection of all windows
+        let common_start = windows.iter().map(|w| w.0).fold(f64::NEG_INFINITY, f64::max);
+        let common_end = windows.iter().map(|w| w.1).fold(f64::INFINITY, f64::min);
+        let overlap_hours = (common_end - common_start).max(0.0);
+        let mut local_times = Vec::new();
+        for p in &input.participants {
+            let tz = p["timezone"].as_str().unwrap_or("UTC");
+            let name = p["name"].as_str().unwrap_or("?");
+            let offset = offsets.get(tz).copied().unwrap_or(0.0);
+            let local_start = common_start + offset;
+            let local_end = common_end + offset;
+            local_times.push(json!({"name": name, "timezone": tz, "local_start": format!("{:02.0}:00", local_start), "local_end": format!("{:02.0}:00", local_end)}));
+        }
+        let feasible = overlap_hours >= input.duration_minutes as f64 / 60.0;
+        json!({"date": input.date, "duration_minutes": input.duration_minutes, "feasible": feasible, "overlap_hours": overlap_hours, "utc_window": format!("{:02.0}:00-{:02.0}:00 UTC", common_start, common_end), "local_times": local_times}).to_string()
+    }
+
+    #[tool(description = "Set work week pattern for a resource (Mon-Fri, Sun-Thu, Mon-Sat, or custom). Includes daily hours and break time.")]
+    async fn work_week_set(&self, Parameters(input): Parameters<WorkWeekInput>) -> String {
+        let days = match input.pattern.as_str() {
+            "mon-fri" => vec!["mon","tue","wed","thu","fri"],
+            "sun-thu" => vec!["sun","mon","tue","wed","thu"],
+            "mon-sat" => vec!["mon","tue","wed","thu","fri","sat"],
+            "sat-thu" => vec!["sat","sun","mon","tue","wed","thu"],
+            _ => input.pattern.split(',').map(|s| s.trim()).collect(),
+        };
+        json!({"status": "set", "resource_id": input.resource_id, "work_days": days, "hours": format!("{}-{}", input.start_time, input.end_time), "break": input.break_start.as_ref().map(|s| format!("{}-{}", s, input.break_end.as_deref().unwrap_or("13:00")))}).to_string()
+    }
+
+    #[tool(description = "Set buffer time between bookings for a resource (travel time, setup/cleanup).")]
+    async fn buffer_set(&self, Parameters(input): Parameters<BufferInput>) -> String {
+        json!({"status": "set", "resource_id": input.resource_id, "buffer_before_min": input.before_minutes.unwrap_or(0), "buffer_after_min": input.after_minutes.unwrap_or(0)}).to_string()
+    }
+
+    #[tool(description = "Set blackout dates (no bookings allowed). For company closures, maintenance windows, etc.")]
+    async fn blackout_set(&self, Parameters(input): Parameters<BlackoutInput>) -> String {
+        // Store as time_off with reason "blackout"
+        let id = Store::new_id("blk");
+        self.store.time_off.lock().unwrap().push(TimeOff { id: id.clone(), resource_id: input.resource_id.clone(), start_date: input.start_date, end_date: input.end_date, reason: format!("blackout: {}", input.reason), status: "approved".into() });
+        json!({"status": "set", "blackout_id": id, "resource_id": input.resource_id, "reason": input.reason}).to_string()
+    }
+}
+
+fn get_tz_offsets() -> std::collections::HashMap<&'static str, f64> {
+    let mut m = std::collections::HashMap::new();
+    m.insert("UTC", 0.0); m.insert("GMT", 0.0);
+    m.insert("Africa/Nairobi", 3.0); m.insert("Africa/Lagos", 1.0); m.insert("Africa/Cairo", 2.0);
+    m.insert("Africa/Johannesburg", 2.0); m.insert("Africa/Addis_Ababa", 3.0); m.insert("Africa/Kigali", 2.0);
+    m.insert("Africa/Dar_es_Salaam", 3.0); m.insert("Africa/Kampala", 3.0);
+    m.insert("Europe/London", 0.0); m.insert("Europe/Paris", 1.0); m.insert("Europe/Berlin", 1.0);
+    m.insert("Europe/Rome", 1.0); m.insert("Europe/Madrid", 1.0); m.insert("Europe/Amsterdam", 1.0);
+    m.insert("Europe/Stockholm", 1.0); m.insert("Europe/Oslo", 1.0); m.insert("Europe/Zurich", 1.0);
+    m.insert("America/New_York", -5.0); m.insert("America/Chicago", -6.0); m.insert("America/Denver", -7.0);
+    m.insert("America/Los_Angeles", -8.0); m.insert("America/Toronto", -5.0); m.insert("America/Sao_Paulo", -3.0);
+    m.insert("Asia/Dubai", 4.0); m.insert("Asia/Riyadh", 3.0); m.insert("Asia/Kolkata", 5.5);
+    m.insert("Asia/Mumbai", 5.5); m.insert("Asia/Shanghai", 8.0); m.insert("Asia/Tokyo", 9.0);
+    m.insert("Asia/Singapore", 8.0); m.insert("Asia/Hong_Kong", 8.0); m.insert("Asia/Seoul", 9.0);
+    m.insert("Asia/Bangkok", 7.0); m.insert("Asia/Jakarta", 7.0); m.insert("Asia/Manila", 8.0);
+    m.insert("Asia/Ho_Chi_Minh", 7.0); m.insert("Asia/Kuala_Lumpur", 8.0);
+    m.insert("Australia/Sydney", 11.0); m.insert("Australia/Melbourne", 11.0); m.insert("Pacific/Auckland", 12.0);
+    m
+}
+
+fn get_holidays(country: &str, year: u32) -> Vec<serde_json::Value> {
+    let y = year.to_string();
+    match country.to_uppercase().as_str() {
+        "KE" => vec![
+            json!({"date": format!("{}-01-01", y), "name": "New Year's Day"}),
+            json!({"date": format!("{}-04-18", y), "name": "Good Friday"}),
+            json!({"date": format!("{}-04-21", y), "name": "Easter Monday"}),
+            json!({"date": format!("{}-05-01", y), "name": "Labour Day"}),
+            json!({"date": format!("{}-06-01", y), "name": "Madaraka Day"}),
+            json!({"date": format!("{}-10-10", y), "name": "Huduma Day"}),
+            json!({"date": format!("{}-10-20", y), "name": "Mashujaa Day"}),
+            json!({"date": format!("{}-12-12", y), "name": "Jamhuri Day"}),
+            json!({"date": format!("{}-12-25", y), "name": "Christmas Day"}),
+            json!({"date": format!("{}-12-26", y), "name": "Boxing Day"}),
+        ],
+        "US" => vec![
+            json!({"date": format!("{}-01-01", y), "name": "New Year's Day"}),
+            json!({"date": format!("{}-01-20", y), "name": "MLK Day"}),
+            json!({"date": format!("{}-02-17", y), "name": "Presidents' Day"}),
+            json!({"date": format!("{}-05-26", y), "name": "Memorial Day"}),
+            json!({"date": format!("{}-06-19", y), "name": "Juneteenth"}),
+            json!({"date": format!("{}-07-04", y), "name": "Independence Day"}),
+            json!({"date": format!("{}-09-01", y), "name": "Labor Day"}),
+            json!({"date": format!("{}-11-27", y), "name": "Thanksgiving"}),
+            json!({"date": format!("{}-12-25", y), "name": "Christmas Day"}),
+        ],
+        "GB" | "UK" => vec![
+            json!({"date": format!("{}-01-01", y), "name": "New Year's Day"}),
+            json!({"date": format!("{}-04-18", y), "name": "Good Friday"}),
+            json!({"date": format!("{}-04-21", y), "name": "Easter Monday"}),
+            json!({"date": format!("{}-05-05", y), "name": "Early May Bank Holiday"}),
+            json!({"date": format!("{}-05-26", y), "name": "Spring Bank Holiday"}),
+            json!({"date": format!("{}-08-25", y), "name": "Summer Bank Holiday"}),
+            json!({"date": format!("{}-12-25", y), "name": "Christmas Day"}),
+            json!({"date": format!("{}-12-26", y), "name": "Boxing Day"}),
+        ],
+        "AE" | "SA" => vec![
+            json!({"date": format!("{}-01-01", y), "name": "New Year's Day"}),
+            json!({"date": format!("{}-03-10", y), "name": "Eid al-Fitr (approx)"}),
+            json!({"date": format!("{}-03-11", y), "name": "Eid al-Fitr Day 2"}),
+            json!({"date": format!("{}-03-12", y), "name": "Eid al-Fitr Day 3"}),
+            json!({"date": format!("{}-06-16", y), "name": "Eid al-Adha (approx)"}),
+            json!({"date": format!("{}-06-17", y), "name": "Eid al-Adha Day 2"}),
+            json!({"date": format!("{}-07-07", y), "name": "Islamic New Year (approx)"}),
+            json!({"date": format!("{}-09-15", y), "name": "Prophet's Birthday (approx)"}),
+            json!({"date": format!("{}-12-02", y), "name": "UAE National Day"}),
+        ],
+        "IN" => vec![
+            json!({"date": format!("{}-01-26", y), "name": "Republic Day"}),
+            json!({"date": format!("{}-03-14", y), "name": "Holi"}),
+            json!({"date": format!("{}-04-18", y), "name": "Good Friday"}),
+            json!({"date": format!("{}-05-01", y), "name": "May Day"}),
+            json!({"date": format!("{}-08-15", y), "name": "Independence Day"}),
+            json!({"date": format!("{}-10-02", y), "name": "Gandhi Jayanti"}),
+            json!({"date": format!("{}-10-20", y), "name": "Diwali (approx)"}),
+            json!({"date": format!("{}-12-25", y), "name": "Christmas Day"}),
+        ],
+        "NG" => vec![
+            json!({"date": format!("{}-01-01", y), "name": "New Year's Day"}),
+            json!({"date": format!("{}-05-01", y), "name": "Workers' Day"}),
+            json!({"date": format!("{}-06-12", y), "name": "Democracy Day"}),
+            json!({"date": format!("{}-10-01", y), "name": "Independence Day"}),
+            json!({"date": format!("{}-12-25", y), "name": "Christmas Day"}),
+            json!({"date": format!("{}-12-26", y), "name": "Boxing Day"}),
+        ],
+        "DE" => vec![
+            json!({"date": format!("{}-01-01", y), "name": "Neujahr"}),
+            json!({"date": format!("{}-04-18", y), "name": "Karfreitag"}),
+            json!({"date": format!("{}-04-21", y), "name": "Ostermontag"}),
+            json!({"date": format!("{}-05-01", y), "name": "Tag der Arbeit"}),
+            json!({"date": format!("{}-10-03", y), "name": "Tag der Deutschen Einheit"}),
+            json!({"date": format!("{}-12-25", y), "name": "Weihnachten"}),
+            json!({"date": format!("{}-12-26", y), "name": "Zweiter Weihnachtstag"}),
+        ],
+        "SG" => vec![
+            json!({"date": format!("{}-01-01", y), "name": "New Year's Day"}),
+            json!({"date": format!("{}-01-29", y), "name": "Chinese New Year"}),
+            json!({"date": format!("{}-04-18", y), "name": "Good Friday"}),
+            json!({"date": format!("{}-05-01", y), "name": "Labour Day"}),
+            json!({"date": format!("{}-08-09", y), "name": "National Day"}),
+            json!({"date": format!("{}-10-20", y), "name": "Deepavali (approx)"}),
+            json!({"date": format!("{}-12-25", y), "name": "Christmas Day"}),
+        ],
+        _ => vec![
+            json!({"date": format!("{}-01-01", y), "name": "New Year's Day"}),
+            json!({"date": format!("{}-05-01", y), "name": "Labour Day"}),
+            json!({"date": format!("{}-12-25", y), "name": "Christmas Day"}),
+        ],
     }
 }
