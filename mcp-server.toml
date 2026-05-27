@@ -1,0 +1,116 @@
+server_id = "mcp_scheduling"
+display_name = "Scheduling"
+version = "1.0.0"
+domain = "scheduling"
+sdk_version = "0.1.0"
+risk_level = "low"
+writes_allowed = "gated"
+transports = ["stdio"]
+credentials = []
+governance_gates = []
+environments = ["development", "staging", "production"]
+
+[[tools]]
+name = "resource_create"
+description = "Create schedulable resource"
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "resource_list"
+description = "List resources"
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "booking_create"
+description = "Create booking with conflict check"
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "booking_cancel"
+description = "Cancel booking"
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "booking_reschedule"
+description = "Reschedule booking"
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "booking_list"
+description = "List bookings"
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "availability_check"
+description = "Check available slots"
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "find_slot"
+description = "Find first available slot"
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "shift_create"
+description = "Schedule a shift"
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "shift_update"
+description = "Update shift status"
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "shift_list"
+description = "List shifts"
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "time_off_request"
+description = "Request time off"
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "time_off_decide"
+description = "Approve/reject time off"
+risk_class = "internal_write"
+requires_approval = true
+credential_bindings = []
+
+[[tools]]
+name = "time_off_list"
+description = "List time off requests"
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "schedule_summary"
+description = "Daily schedule summary"
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
