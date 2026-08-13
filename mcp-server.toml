@@ -1,116 +1,235 @@
 server_id = "mcp_scheduling"
 display_name = "Scheduling"
-version = "1.4.0"
+version = "1.5.0"
 domain = "scheduling"
-sdk_version = "0.1.0"
-risk_level = "low"
+sdk_version = "0.2.0"
+risk_level = "medium"
 writes_allowed = "gated"
 transports = ["stdio"]
 credentials = []
-governance_gates = []
+governance_gates = ["mrtr_approval"]
 environments = ["development", "staging", "production"]
 
 [[tools]]
 name = "resource_create"
-description = "Create schedulable resource"
+description = "Create a schedulable resource (person, room, equipment, vehicle) with optional working hours and timezone."
 risk_class = "internal_write"
 requires_approval = false
 credential_bindings = []
 
 [[tools]]
 name = "resource_list"
-description = "List resources"
+description = "List all resources (optionally filter by type: person, room, equipment, vehicle)."
 risk_class = "read_only"
 requires_approval = false
 credential_bindings = []
 
 [[tools]]
 name = "booking_create"
-description = "Create booking with conflict check"
+description = "Create a booking/appointment. Checks for conflicts — rejects if resource is already booked at that time."
 risk_class = "internal_write"
 requires_approval = false
 credential_bindings = []
 
 [[tools]]
 name = "booking_cancel"
-description = "Cancel booking"
+description = "Cancel a booking."
 risk_class = "internal_write"
 requires_approval = false
 credential_bindings = []
 
 [[tools]]
 name = "booking_reschedule"
-description = "Reschedule booking"
+description = "Reschedule a booking to a new time. Checks for conflicts at the new time."
 risk_class = "internal_write"
 requires_approval = false
 credential_bindings = []
 
 [[tools]]
-name = "booking_list"
-description = "List bookings"
-risk_class = "read_only"
-requires_approval = false
-credential_bindings = []
-
-[[tools]]
 name = "availability_check"
-description = "Check available slots"
+description = "Get available time slots for a resource on a given date. Returns free windows."
 risk_class = "read_only"
 requires_approval = false
 credential_bindings = []
 
 [[tools]]
 name = "find_slot"
-description = "Find first available slot"
+description = "Find the first available slot across multiple resources for a given duration."
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "booking_list"
+description = "List bookings for a resource or date range."
 risk_class = "read_only"
 requires_approval = false
 credential_bindings = []
 
 [[tools]]
 name = "shift_create"
-description = "Schedule a shift"
+description = "Schedule a shift for a resource (employee). Checks for conflicts with existing shifts and time off."
 risk_class = "internal_write"
 requires_approval = false
 credential_bindings = []
 
 [[tools]]
 name = "shift_update"
-description = "Update shift status"
+description = "Update shift status (confirmed, started, completed, no_show)."
 risk_class = "internal_write"
 requires_approval = false
 credential_bindings = []
 
 [[tools]]
 name = "shift_list"
-description = "List shifts"
+description = "List shifts for a resource or date range."
 risk_class = "read_only"
 requires_approval = false
 credential_bindings = []
 
 [[tools]]
 name = "time_off_request"
-description = "Request time off"
+description = "Request time off (vacation, sick, personal). Requires approval."
 risk_class = "internal_write"
 requires_approval = false
 credential_bindings = []
 
 [[tools]]
 name = "time_off_decide"
-description = "Approve/reject time off"
+description = "Approve or reject a time off request."
 risk_class = "internal_write"
 requires_approval = true
 credential_bindings = []
 
 [[tools]]
 name = "time_off_list"
-description = "List time off requests"
+description = "List time off requests for a resource."
 risk_class = "read_only"
 requires_approval = false
 credential_bindings = []
 
 [[tools]]
 name = "schedule_summary"
-description = "Daily schedule summary"
+description = "Get schedule summary for a resource on a date (shifts, bookings, time off status)."
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "holidays_list"
+description = "Get public holidays for a country and year. Covers 40+ countries with cultural and religious holidays."
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "timezone_convert"
+description = "Convert time between timezones. Supports all IANA timezone names."
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "find_overlap"
+description = "Find overlapping working hours across participants in different timezones. Essential for international meetings."
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "work_week_set"
+description = "Set work week pattern for a resource (Mon-Fri, Sun-Thu, Mon-Sat, or custom). Includes daily hours and break time."
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "buffer_set"
+description = "Set buffer time between bookings for a resource (travel time, setup/cleanup)."
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "blackout_set"
+description = "Set blackout dates (no bookings allowed). For company closures, maintenance windows, etc."
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "waitlist_join"
+description = "Join a waitlist when a desired slot is full. Gets notified when slot opens."
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "round_robin_assign"
+description = "Auto-assign a booking to the least-busy resource from a pool (round-robin distribution)."
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "reminder_set"
+description = "Set a reminder for a booking (N minutes before). Returns reminder details for the notification system."
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "slot_hold"
+description = "Tentatively hold a slot (soft reservation). Expires after N minutes if not confirmed. Prevents double-booking during checkout."
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "group_booking"
+description = "Create a group booking with capacity (classes, events, group sessions). Multiple attendees share one slot up to max capacity."
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "ics_export"
+description = "Export a booking as iCalendar (ICS) format for import into Google Calendar, Outlook, Apple Calendar."
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "booking_link_create"
+description = "Generate a shareable booking link configuration (like Calendly). Defines available slots for self-service booking."
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "sync_google_calendar"
+description = "Sync with Google Calendar. Pull imports events, push exports bookings. Requires GOOGLE_CALENDAR_TOKEN env var."
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "sync_outlook"
+description = "Sync with Microsoft Outlook/365 Calendar. Requires MICROSOFT_GRAPH_TOKEN env var."
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "sync_calcom"
+description = "Sync with Cal.com. Pull imports bookings, push creates events. Requires CALCOM_API_KEY env var."
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "sync_calendly"
+description = "Sync with Calendly. Pull imports scheduled events. Requires CALENDLY_TOKEN env var."
 risk_class = "read_only"
 requires_approval = false
 credential_bindings = []

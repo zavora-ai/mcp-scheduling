@@ -2,8 +2,9 @@
 
 [package]
 name = "mcp-scheduling"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
+rust-version = "1.94.1"
 description = "Scheduling MCP server — appointments, shifts, resource booking, availability, recurring events, conflict detection, timezone-aware"
 license = "Apache-2.0"
 repository = "https://github.com/zavora-ai/mcp-scheduling"
@@ -11,7 +12,7 @@ keywords = ["mcp", "scheduling", "appointments", "booking", "shifts"]
 categories = ["api-bindings"]
 
 [dependencies]
-adk-mcp-sdk = "0.1"
+adk-mcp-sdk = { version = "0.2.0", git = "https://github.com/zavora-ai/adk-mcp-sdk.git", rev = "4dac4301441a8a51a042fd66cc1798f0ec3e3f55" }
 rmcp = { version = "3.1.2", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
