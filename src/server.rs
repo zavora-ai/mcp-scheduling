@@ -228,7 +228,7 @@ impl SchedulingServer {
     }
 }
 
-#[tool_router(server_handler)]
+#[tool_router]
 impl SchedulingServer {
     #[tool(description = "Create a schedulable resource (person, room, equipment, vehicle) with optional working hours and timezone.")]
     async fn resource_create(&self, Parameters(input): Parameters<ResourceInput>) -> String {
@@ -997,4 +997,11 @@ fn get_holidays(country: &str, year: u32) -> Vec<serde_json::Value> {
             json!({"date": format!("{}-12-25", y), "name": "Christmas Day"}),
         ],
     }
+}
+
+adk_mcp_sdk::mcp_2026_server! {
+    server: SchedulingServer,
+    task_tools: ["timezone_convert", "ics_export", "sync_google_calendar", "sync_outlook", "sync_calcom", "sync_calendly"],
+    approval_tools: ["time_off_decide"],
+    cache_ttl_ms: 60_000,
 }
